@@ -1,1 +1,0 @@
-{"dependencies": ["mysql"], "next": [{"build": "publish", "build_in": "out", "run_when_any": ["release"], "config": {"clear_build_path": false, "visibility": "public"}}], "name": "wordpress", "type": "deployment"}
