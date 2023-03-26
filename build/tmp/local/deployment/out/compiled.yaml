@@ -1,0 +1,231 @@
+{this.executor.PushGlobalContextKey('mysql')}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {name}-service
+  labels:
+    app: {name}
+spec:
+  ports:
+  - name: mysql
+    port: 3306
+    protocol: TCP
+  selector:
+    app: {name}
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {name}
+  labels:
+    app: {name}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {name}
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: {name}
+    spec:
+      containers:
+      - image: {image}
+        name: mysql
+        args: ["--default-authentication-plugin=mysql_native_password", "--skip-log-bin"]
+        env:
+        - name: MYSQL_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {name}-secret
+              key: MYSQL_PASSWORD
+        - name: MYSQL_USER
+          valueFrom:
+            secretKeyRef:
+              name: {name}-secret
+              key: MYSQL_USER
+        - name: MYSQL_DATABASE
+          value: {database}
+        - name: MYSQL_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {name}-secret
+              key: MYSQL_ROOT_PASSWORD
+        ports:
+        - containerPort: 3306
+          name: mysql
+        volumeMounts:
+        - name: {name}-hostpath
+          mountPath: /var/lib/mysql
+      volumes:
+      - name: {name}-hostpath
+        hostPath:
+          path: {hostpath}
+          type: DirectoryOrCreate
+
+---
+apiVersion: v1
+kind: Secret
+type: Opaque
+metadata:
+  labels:
+    app: {name}
+  name: {name}-secret
+  annotations:
+    helm.sh/hook: pre-install
+data:
+  MYSQL_PASSWORD: {base64.b64encode(''.join(random.choices(string.ascii_letters + string.digits, k=32).encode('ascii')))}
+  MYSQL_ROOT_PASSWORD: {base64.b64encode(''.join(random.choices(string.ascii_letters + string.digits, k=32).encode('ascii')))}
+  MYSQL_USER: {base64.b64encode(f'{name}-user')}
+
+---
+
+---
+{this.executor.PopGlobalContextKey('mysql')}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {name}-service
+  labels:
+    app: {name}
+spec:
+  ports:
+  - name: http
+    port: 80
+    protocol: TCP
+  selector:
+    app: {name}
+  type: ClusterIP
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {name}-config-php
+data:
+  {name}-php.ini: |
+    upload_max_filesize = 1024M
+    post_max_size = 1024M
+    max_execution_time = 600
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {name}
+  labels:
+    app: {name}
+spec:
+  selector:
+    matchLabels:
+      app: {name}
+  template:
+    metadata:
+      labels:
+        app: {name}
+    spec:
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+                - key: app
+                  operator: In
+                  values: [{mysql.name}]
+            topologyKey: kubernetes.io/hostname
+            # namespaces: ["*"]
+      containers:
+      - image: {image}
+        name: wordpress
+        env:
+        - name: WORDPRESS_DB_HOST
+          value: {mysql.name}-service:3306
+        - name: WORDPRESS_DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {mysql.name}-secret
+              key: MYSQL_PASSWORD
+        - name: WORDPRESS_DB_USER
+          valueFrom:
+            secretKeyRef:
+              name: {mysql.name}-secret
+              key: MYSQL_USER
+        - name: WORDPRESS_DB_NAME
+          value: {mysql.database}
+        ports:
+        - containerPort: 80
+          name: http
+        volumeMounts:
+        - name: {name}-hostpath
+          mountPath: /var/www/html
+        - name: {name}-config-php
+          mountPath: /usr/local/etc/php/conf.d/{name}-php.ini
+          subPath: {name}-php.ini
+        resources:
+          requests:
+            cpu: {resources.requests.cpu}
+            memory: {resources.requests.memory}
+          limits:
+            cpu: {resources.limits.cpu}
+            memory: {resources.limits.memory}
+      volumes:
+      - name: {name}-hostpath
+        hostPath:
+          path: {hostpath}
+          type: DirectoryOrCreate
+      - name: {name}-config-php
+        configMap:
+          name: {name}-php.ini
+      priorityClassName: {priority}
+
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {name}-cert
+spec:
+  dnsNames:
+    - {domain}
+  secretName: {name}-cert
+  issuerRef:
+    name: {cert.issuer}
+    kind: {cert.kind}
+
+---
+apiVersion: traefik.containo.us/v1alpha1
+kind: IngressRoute
+metadata:
+  name: {name}
+spec:
+  entryPoints:
+    - websecure
+  routes:
+  - kind: Rule
+    match: Host(`{domain}`)
+    services:
+    - name: {name}-service
+      port: 80
+  tls:
+    secretName: {name}-cert
+---
+apiVersion: traefik.containo.us/v1alpha1
+kind: IngressRoute
+metadata:
+  name: {name}-80redirect
+spec:
+  entryPoints:
+    - web
+  routes:
+  - kind: Rule
+    match: Host(`{domain}`)
+    middlewares:
+      - name: https-redirect
+        namespace: default
+    services:
+    - name: {name}-service
+      port: 80
+---
+---
